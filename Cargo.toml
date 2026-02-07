@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 # FrankenTUI crates (local path for now)
 ftui-core = { path = "../frankentui/crates/ftui-core" }
+ftui-extras = { path = "../frankentui/crates/ftui-extras", features = ["forms"] }
 ftui-layout = { path = "../frankentui/crates/ftui-layout" }
 ftui-render = { path = "../frankentui/crates/ftui-render" }
 ftui-runtime = { path = "../frankentui/crates/ftui-runtime" }

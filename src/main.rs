@@ -30,7 +30,9 @@ use ftui_widgets::borders::{BorderType, Borders};
 use ftui_widgets::paragraph::Paragraph;
 use ftui_widgets::table::{Table, Row, TableState};
 use ftui_widgets::modal::{Dialog, DialogState, DialogResult};
+use ftui_widgets::textarea::TextArea;
 use ftui_widgets::{StatefulWidget, Widget};
+use ftui_extras::forms::{Form, FormField, FormState, FormValue};
 use serde::Deserialize;
 use tungstenite::{connect, Message as WsMessage};
 use url::Url;
@@ -201,6 +203,48 @@ fn update_item_position(base_url: &str, list_id: &str, item_id: &str, position: 
     api_post(base_url, "item-update", &body)
 }
 
+fn update_item_fields(
+    base_url: &str,
+    list_id: &str,
+    item_id: &str,
+    title: Option<&str>,
+    url: Option<&str>,
+    tags: Option<Vec<String>>,
+    notes: Option<&str>,
+    completed: Option<bool>,
+) -> Result<ListItem, String> {
+    let mut body = serde_json::json!({
+        "listId": list_id,
+        "id": item_id,
+    });
+    
+    if let Some(t) = title {
+        body["title"] = serde_json::json!(t);
+    }
+    if let Some(u) = url {
+        if u.is_empty() {
+            body["url"] = serde_json::Value::Null;
+        } else {
+            body["url"] = serde_json::json!(u);
+        }
+    }
+    if let Some(t) = tags {
+        body["tags"] = serde_json::json!(t);
+    }
+    if let Some(n) = notes {
+        if n.is_empty() {
+            body["notes"] = serde_json::Value::Null;
+        } else {
+            body["notes"] = serde_json::json!(n);
+        }
+    }
+    if let Some(c) = completed {
+        body["completed"] = serde_json::json!(c);
+    }
+    
+    api_post(base_url, "item-update", &body.to_string())
+}
+
 // ============================================================================
 // WebSocket Connection
 // ============================================================================
@@ -333,6 +377,7 @@ enum View {
     Search,
     AqlQuery,
     Detail,
+    Edit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -466,9 +511,42 @@ struct ListsTableBrowser {
     delete_confirm: Option<(String, String, String)>,  // (list_id, item_id, item_title)
     dialog_state: DialogState,
     
+    // Edit form
+    edit_item: Option<ListItem>,
+    edit_form: Option<Form>,
+    edit_form_state: FormState,
+    edit_notes: TextArea,
+    edit_focus: EditFocus,
+    
     // Messages
     status_message: Option<String>,
     error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum EditFocus {
+    #[default]
+    Form,
+    Notes,
+    Buttons,
+}
+
+impl EditFocus {
+    fn next(self) -> Self {
+        match self {
+            Self::Form => Self::Notes,
+            Self::Notes => Self::Buttons,
+            Self::Buttons => Self::Form,
+        }
+    }
+    
+    fn prev(self) -> Self {
+        match self {
+            Self::Form => Self::Buttons,
+            Self::Notes => Self::Form,
+            Self::Buttons => Self::Notes,
+        }
+    }
 }
 
 enum Msg {
@@ -521,6 +599,11 @@ impl ListsTableBrowser {
             ws_connected: false,
             delete_confirm: None,
             dialog_state: DialogState::default(),
+            edit_item: None,
+            edit_form: None,
+            edit_form_state: FormState::default(),
+            edit_notes: TextArea::new(),
+            edit_focus: EditFocus::default(),
             status_message: None,
             error_message: None,
         };
@@ -627,6 +710,49 @@ impl Model for ListsTableBrowser {
                             _ => {}
                         }
                         return Cmd::none();
+                    }
+                    return Cmd::none();
+                }
+                
+                // Handle Edit view events
+                if self.view == View::Edit {
+                    if let Event::Key(key) = &event {
+                        if key.kind == ftui_core::event::KeyEventKind::Press {
+                            match key.code {
+                                KeyCode::Escape => {
+                                    self.cancel_edit();
+                                    return Cmd::none();
+                                }
+                                KeyCode::Tab => {
+                                    if key.modifiers.contains(Modifiers::SHIFT) {
+                                        self.edit_focus = self.edit_focus.prev();
+                                    } else {
+                                        self.edit_focus = self.edit_focus.next();
+                                    }
+                                    return Cmd::none();
+                                }
+                                KeyCode::Enter if self.edit_focus == EditFocus::Buttons => {
+                                    self.save_edit();
+                                    return Cmd::none();
+                                }
+                                _ => {}
+                            }
+                            
+                            // Forward events to focused component
+                            match self.edit_focus {
+                                EditFocus::Form => {
+                                    if let Some(ref mut form) = self.edit_form {
+                                        self.edit_form_state.handle_event(form, &event);
+                                    }
+                                }
+                                EditFocus::Notes => {
+                                    self.edit_notes.handle_event(&event);
+                                }
+                                EditFocus::Buttons => {
+                                    // Already handled Enter above
+                                }
+                            }
+                        }
                     }
                     return Cmd::none();
                 }
@@ -848,6 +974,13 @@ impl Model for ListsTableBrowser {
                     " Detail ".to_string()
                 }
             }
+            View::Edit => {
+                if let Some(ref item) = self.edit_item {
+                    format!(" Edit: {} ", item.title)
+                } else {
+                    " Edit ".to_string()
+                }
+            }
         };
         
         let table_block = Block::default()
@@ -873,6 +1006,9 @@ impl Model for ListsTableBrowser {
             }
             View::Detail => {
                 self.render_detail(frame, table_inner);
+            }
+            View::Edit => {
+                self.render_edit(frame, table_inner);
             }
         }
         
@@ -926,8 +1062,9 @@ impl Model for ListsTableBrowser {
             InputMode::AqlQuery => format!("{} Enter:run-query  Esc:cancel ", ws_indicator),
             InputMode::ListFilter => format!("{} Enter:select  Esc:clear-filter ", ws_indicator),
             InputMode::Normal => match self.view {
-                View::Detail => format!("{} Esc:back  o:open-url  j/k:scroll  q:quit ", ws_indicator),
-                _ => format!("{} q:quit  /:search  ::aql  n:new  d:del  Space:toggle  o:open  y:copy ", ws_indicator),
+                View::Detail => format!("{} Esc:back  e:edit  o:open-url  j/k:scroll  q:quit ", ws_indicator),
+                View::Edit => format!("{} Tab:focus  Enter:save  Esc:cancel ", ws_indicator),
+                _ => format!("{} q:quit  /:search  ::aql  n:new  e:edit  d:del  Space:✓  o:open  y:copy ", ws_indicator),
             },
         };
         
@@ -1338,6 +1475,111 @@ impl ListsTableBrowser {
         }
     }
     
+    fn start_edit(&mut self) {
+        let item = match self.view {
+            View::Items => self.table_state.selected.and_then(|i| self.items.get(i).cloned()),
+            View::Search => self.search_table_state.selected.and_then(|i| self.search_results.get(i).cloned()),
+            View::AqlQuery => self.aql_table_state.selected.and_then(|i| self.aql_results.get(i).cloned()),
+            View::Detail => self.detail_item.clone(),
+            _ => None,
+        };
+        
+        let Some(item) = item else { return };
+        
+        // Create form with item fields
+        let form = Form::new(vec![
+            FormField::text_with_value("Title", &item.title),
+            FormField::text_with_value("URL", item.url.as_deref().unwrap_or("")),
+            FormField::text_with_value("Tags", item.tags.join(", ")),
+            FormField::checkbox("Completed", item.completed.unwrap_or(false)),
+        ])
+        .label_style(Style::new().fg(colors::FG_SECONDARY))
+        .focused_style(Style::new().fg(colors::ACCENT_PRIMARY).bg(colors::BG_SELECTED))
+        .style(Style::new().fg(colors::FG_PRIMARY));
+        
+        // Set up notes textarea
+        let mut notes = TextArea::new();
+        if let Some(ref n) = item.notes {
+            notes.insert_text(n);
+        }
+        
+        self.edit_item = Some(item);
+        self.edit_form = Some(form);
+        self.edit_form_state = FormState::default();
+        self.edit_notes = notes;
+        self.edit_focus = EditFocus::Form;
+        self.view = View::Edit;
+    }
+    
+    fn save_edit(&mut self) {
+        let Some(ref item) = self.edit_item else { return };
+        let Some(ref form) = self.edit_form else { return };
+        let Some(list) = self.selected_list() else { return };
+        
+        // Extract form values
+        let data = form.data();
+        
+        let title = data.get("Title").and_then(|v| {
+            if let FormValue::Text(s) = v { Some(s.as_str()) } else { None }
+        });
+        let url = data.get("URL").and_then(|v| {
+            if let FormValue::Text(s) = v { Some(s.as_str()) } else { None }
+        });
+        let tags_str = data.get("Tags").and_then(|v| {
+            if let FormValue::Text(s) = v { Some(s.as_str()) } else { None }
+        });
+        let completed = data.get("Completed").and_then(|v| {
+            if let FormValue::Bool(b) = v { Some(*b) } else { None }
+        });
+        
+        // Parse tags from comma-separated string
+        let tags: Option<Vec<String>> = tags_str.map(|s| {
+            s.split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect()
+        });
+        
+        // Get notes from textarea
+        let notes_text = self.edit_notes.text();
+        let notes = if notes_text.is_empty() { None } else { Some(notes_text.as_str()) };
+        
+        let list_id = list.id.clone();
+        let item_id = item.id.clone();
+        
+        match update_item_fields(
+            &self.base_url,
+            &list_id,
+            &item_id,
+            title,
+            url,
+            tags,
+            notes,
+            completed,
+        ) {
+            Ok(_updated) => {
+                self.status_message = Some("Item saved".to_string());
+                self.error_message = None;
+                // Go back and refresh
+                self.view = View::Items;
+                self.load_items();
+            }
+            Err(e) => {
+                self.error_message = Some(format!("Failed to save: {}", e));
+            }
+        }
+        
+        // Clear edit state
+        self.edit_item = None;
+        self.edit_form = None;
+    }
+    
+    fn cancel_edit(&mut self) {
+        self.edit_item = None;
+        self.edit_form = None;
+        self.view = View::Items;
+    }
+    
     fn open_selected_url(&self) {
         let url = match self.view {
             View::Items => self.table_state.selected.and_then(|i| self.items.get(i).and_then(|item| item.url.clone())),
@@ -1627,7 +1869,7 @@ impl ListsTableBrowser {
                                         self.view = View::Lists;
                                         self.focus = Focus::Sidebar;
                                     }
-                                    View::Lists => {}
+                                    View::Lists | View::Edit => {}
                                 }
                             }
                         }
@@ -1679,6 +1921,12 @@ impl ListsTableBrowser {
                     
                     KeyCode::Char('o') => {
                         self.open_selected_url();
+                    }
+                    
+                    KeyCode::Char('e') => {
+                        if self.view == View::Items || self.view == View::Search || self.view == View::AqlQuery || self.view == View::Detail {
+                            self.start_edit();
+                        }
                     }
                     
                     KeyCode::Char('y') => {
@@ -1926,6 +2174,64 @@ impl ListsTableBrowser {
                     .render(Rect::new(area.x, y, area.width, 1), frame);
             }
         }
+    }
+    
+    fn render_edit(&self, frame: &mut Frame, area: Rect) {
+        let Some(ref form) = self.edit_form else { return };
+        
+        // Layout: form fields (6 lines) + notes label (1) + notes area (rest) + buttons (1)
+        let chunks = Flex::vertical()
+            .constraints([
+                Constraint::Fixed(6),   // Form fields
+                Constraint::Fixed(1),   // Notes label
+                Constraint::Min(5),     // Notes textarea
+                Constraint::Fixed(1),   // Buttons
+            ])
+            .split(area);
+        
+        // === Form fields ===
+        let mut form_state = self.edit_form_state.clone();
+        StatefulWidget::render(form, chunks[0], frame, &mut form_state);
+        
+        // === Notes label ===
+        let notes_label_style = if self.edit_focus == EditFocus::Notes {
+            Style::new().fg(colors::ACCENT_PRIMARY)
+        } else {
+            Style::new().fg(colors::FG_SECONDARY)
+        };
+        Paragraph::new("Notes:")
+            .style(notes_label_style)
+            .render(chunks[1], frame);
+        
+        // === Notes textarea ===
+        let notes_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(if self.edit_focus == EditFocus::Notes {
+                Style::new().fg(colors::BORDER_FOCUSED)
+            } else {
+                Style::new().fg(colors::BORDER_UNFOCUSED)
+            });
+        
+        let notes_inner = notes_block.inner(chunks[2]);
+        notes_block.render(chunks[2], frame);
+        
+        // Render textarea
+        let mut notes = self.edit_notes.clone();
+        notes = notes.with_style(Style::new().fg(colors::FG_PRIMARY));
+        Widget::render(&notes, notes_inner, frame);
+        
+        // === Buttons ===
+        let button_style = if self.edit_focus == EditFocus::Buttons {
+            Style::new().fg(colors::ACCENT_PRIMARY)
+        } else {
+            Style::new().fg(colors::FG_SECONDARY)
+        };
+        
+        let buttons = "  [ Save ]    [ Cancel ]    (Tab: switch focus, Enter: action)";
+        Paragraph::new(buttons)
+            .style(button_style)
+            .render(chunks[3], frame);
     }
 }
 
