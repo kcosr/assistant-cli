@@ -1559,17 +1559,22 @@ impl ListsTableBrowser {
             notes,
             completed,
         ) {
-            Ok(_updated) => {
+            Ok(updated) => {
                 self.status_message = Some("Item saved".to_string());
                 self.error_message = None;
-                // Go back and refresh
-                self.view = View::Items;
-                let saved_item_id = item_id.clone();
-                self.load_items();
-                // Restore selection to the saved item
-                if let Some(idx) = self.items.iter().position(|i| i.id == saved_item_id) {
-                    self.table_state.select(Some(idx));
+                
+                // Update item in place in the local list (preserves selection)
+                if let Some(idx) = self.items.iter().position(|i| i.id == item_id) {
+                    self.items[idx] = updated.clone();
+                    // Re-sort (completed items at bottom)
+                    Self::sort_items(&mut self.items);
+                    // Find the item's new position after sort
+                    if let Some(new_idx) = self.items.iter().position(|i| i.id == item_id) {
+                        self.table_state.select(Some(new_idx));
+                    }
                 }
+                
+                self.view = View::Items;
             }
             Err(e) => {
                 self.error_message = Some(format!("Failed to save: {}", e));
