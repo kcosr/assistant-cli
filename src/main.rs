@@ -1564,7 +1564,12 @@ impl ListsTableBrowser {
                 self.error_message = None;
                 // Go back and refresh
                 self.view = View::Items;
+                let saved_item_id = item_id.clone();
                 self.load_items();
+                // Restore selection to the saved item
+                if let Some(idx) = self.items.iter().position(|i| i.id == saved_item_id) {
+                    self.table_state.select(Some(idx));
+                }
             }
             Err(e) => {
                 self.error_message = Some(format!("Failed to save: {}", e));
