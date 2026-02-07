@@ -1,0 +1,38 @@
+[package]
+name = "assistant-cli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "TUI client for the Assistant Lists plugin"
+license = "MIT"
+
+[[bin]]
+name = "lists"
+path = "src/main.rs"
+
+[dependencies]
+# FrankenTUI crates (local path for now)
+ftui-core = { path = "../frankentui/crates/ftui-core" }
+ftui-layout = { path = "../frankentui/crates/ftui-layout" }
+ftui-render = { path = "../frankentui/crates/ftui-render" }
+ftui-runtime = { path = "../frankentui/crates/ftui-runtime" }
+ftui-style = { path = "../frankentui/crates/ftui-style" }
+ftui-widgets = { path = "../frankentui/crates/ftui-widgets" }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# WebSocket
+tungstenite = "0.21"
+url = "2"
+
+# Clipboard (OSC 52)
+base64 = "0.22"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
