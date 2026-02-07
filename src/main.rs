@@ -31,6 +31,7 @@ use ftui_widgets::paragraph::Paragraph;
 use ftui_widgets::table::{Table, Row, TableState};
 use ftui_widgets::modal::{Dialog, DialogState, DialogResult};
 use ftui_widgets::textarea::TextArea;
+use ftui_text::WrapMode;
 use ftui_widgets::{StatefulWidget, Widget};
 use ftui_extras::forms::{Form, FormField, FormState, FormValue};
 use ftui_extras::markdown::render_markdown;
@@ -2186,9 +2187,10 @@ impl ListsTableBrowser {
                         area.height.saturating_sub(notes_start as u16),
                     );
                     
-                    // Render markdown
+                    // Render markdown with word wrap
                     let md_text = render_markdown(notes);
                     Paragraph::new(md_text)
+                        .wrap(WrapMode::Word)
                         .render(notes_area, frame);
                 }
             }
@@ -2237,7 +2239,9 @@ impl ListsTableBrowser {
         
         // Render textarea
         let mut notes = self.edit_notes.clone();
-        notes = notes.with_style(Style::new().fg(colors::FG_PRIMARY));
+        notes = notes
+            .with_style(Style::new().fg(colors::FG_PRIMARY))
+            .with_soft_wrap(true);
         Widget::render(&notes, notes_inner, frame);
         
         // === Buttons ===
