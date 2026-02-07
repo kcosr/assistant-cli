@@ -33,6 +33,7 @@ use ftui_widgets::modal::{Dialog, DialogState, DialogResult};
 use ftui_widgets::textarea::TextArea;
 use ftui_widgets::{StatefulWidget, Widget};
 use ftui_extras::forms::{Form, FormField, FormState, FormValue};
+use ftui_extras::markdown::render_markdown;
 use serde::Deserialize;
 use tungstenite::{connect, Message as WsMessage};
 use url::Url;
@@ -2125,53 +2126,71 @@ impl ListsTableBrowser {
     
     fn render_detail(&self, frame: &mut Frame, area: Rect) {
         if let Some(ref item) = self.detail_item {
-            let mut lines: Vec<(String, Style)> = Vec::new();
+            // Calculate header height
+            let mut header_lines: Vec<(String, Style)> = Vec::new();
             
             // Title
-            lines.push(("Title".to_string(), Style::new().fg(colors::ACCENT_PRIMARY)));
-            lines.push((format!("  {}", item.title), Style::new().fg(colors::FG_PRIMARY)));
-            lines.push((String::new(), Style::default()));
+            header_lines.push(("Title".to_string(), Style::new().fg(colors::ACCENT_PRIMARY)));
+            header_lines.push((format!("  {}", item.title), Style::new().fg(colors::FG_PRIMARY)));
+            header_lines.push((String::new(), Style::default()));
             
             // Status
             if let Some(completed) = item.completed {
-                lines.push(("Status".to_string(), Style::new().fg(colors::ACCENT_PRIMARY)));
+                header_lines.push(("Status".to_string(), Style::new().fg(colors::ACCENT_PRIMARY)));
                 let status = if completed { "  ✓ Completed" } else { "  ◯ Not completed" };
-                lines.push((status.to_string(), Style::new().fg(colors::ACCENT_COMPLETED)));
-                lines.push((String::new(), Style::default()));
+                header_lines.push((status.to_string(), Style::new().fg(colors::ACCENT_COMPLETED)));
+                header_lines.push((String::new(), Style::default()));
             }
             
             // URL
             if let Some(ref url) = item.url {
-                lines.push(("URL".to_string(), Style::new().fg(colors::ACCENT_PRIMARY)));
-                lines.push((format!("  {}", url), Style::new().fg(colors::ACCENT_URL)));
-                lines.push((String::new(), Style::default()));
+                header_lines.push(("URL".to_string(), Style::new().fg(colors::ACCENT_PRIMARY)));
+                header_lines.push((format!("  {}", url), Style::new().fg(colors::ACCENT_URL)));
+                header_lines.push((String::new(), Style::default()));
             }
             
             // Tags
             if !item.tags.is_empty() {
-                lines.push(("Tags".to_string(), Style::new().fg(colors::ACCENT_PRIMARY)));
-                lines.push((format!("  {}", item.tags.join(", ")), Style::new().fg(colors::ACCENT_TAG)));
-                lines.push((String::new(), Style::default()));
+                header_lines.push(("Tags".to_string(), Style::new().fg(colors::ACCENT_PRIMARY)));
+                header_lines.push((format!("  {}", item.tags.join(", ")), Style::new().fg(colors::ACCENT_TAG)));
+                header_lines.push((String::new(), Style::default()));
             }
             
-            // Notes
-            if let Some(ref notes) = item.notes {
-                lines.push(("Notes".to_string(), Style::new().fg(colors::ACCENT_PRIMARY)));
-                for line in notes.lines() {
-                    lines.push((format!("  {}", line), Style::new().fg(colors::FG_PRIMARY)));
-                }
+            // Notes label
+            if item.notes.is_some() {
+                header_lines.push(("Notes".to_string(), Style::new().fg(colors::ACCENT_PRIMARY)));
             }
             
-            // Render with scroll
-            for (i, (text, style)) in lines.iter().skip(self.detail_scroll).enumerate() {
+            let header_height = header_lines.len();
+            
+            // Render header with scroll
+            for (i, (text, style)) in header_lines.iter().skip(self.detail_scroll).enumerate() {
                 if i >= area.height as usize {
-                    break;
+                    return; // No room for notes
                 }
                 let y = area.y + i as u16;
                 let truncated: String = text.chars().take(area.width as usize).collect();
                 Paragraph::new(truncated)
                     .style(*style)
                     .render(Rect::new(area.x, y, area.width, 1), frame);
+            }
+            
+            // Render notes as markdown
+            if let Some(ref notes) = item.notes {
+                let notes_start = header_height.saturating_sub(self.detail_scroll);
+                if notes_start < area.height as usize {
+                    let notes_area = Rect::new(
+                        area.x + 2, // Indent
+                        area.y + notes_start as u16,
+                        area.width.saturating_sub(2),
+                        area.height.saturating_sub(notes_start as u16),
+                    );
+                    
+                    // Render markdown
+                    let md_text = render_markdown(notes);
+                    Paragraph::new(md_text)
+                        .render(notes_area, frame);
+                }
             }
         }
     }
