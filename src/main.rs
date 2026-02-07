@@ -1716,6 +1716,23 @@ impl ListsTableBrowser {
                         self.input_mode = InputMode::Normal;
                         // Keep results visible, just exit input mode
                     }
+                    KeyCode::Up => {
+                        if let Some(selected) = self.search_table_state.selected {
+                            if selected > 0 {
+                                self.search_table_state.select(Some(selected - 1));
+                            }
+                        }
+                    }
+                    KeyCode::Down => {
+                        let len = self.search_results.len();
+                        if let Some(selected) = self.search_table_state.selected {
+                            if selected + 1 < len {
+                                self.search_table_state.select(Some(selected + 1));
+                            }
+                        } else if len > 0 {
+                            self.search_table_state.select(Some(0));
+                        }
+                    }
                     _ => {}
                 }
             }
