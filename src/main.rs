@@ -519,6 +519,8 @@ struct ListsTableBrowser {
     edit_form_state: FormState,
     edit_notes: TextArea,
     edit_focus: EditFocus,
+    edit_from_view: View,
+    edit_from_selection: Option<usize>,
     
     // Messages
     status_message: Option<String>,
@@ -606,6 +608,8 @@ impl ListsTableBrowser {
             edit_form_state: FormState::default(),
             edit_notes: TextArea::new(),
             edit_focus: EditFocus::default(),
+            edit_from_view: View::Items,
+            edit_from_selection: None,
             status_message: None,
             error_message: None,
         };
@@ -1478,6 +1482,15 @@ impl ListsTableBrowser {
     }
     
     fn start_edit(&mut self) {
+        // Save where we came from
+        self.edit_from_view = self.view;
+        self.edit_from_selection = match self.view {
+            View::Items => self.table_state.selected,
+            View::Search => self.search_table_state.selected,
+            View::AqlQuery => self.aql_table_state.selected,
+            _ => None,
+        };
+        
         let item = match self.view {
             View::Items => self.table_state.selected.and_then(|i| self.items.get(i).cloned()),
             View::Search => self.search_table_state.selected.and_then(|i| self.search_results.get(i).cloned()),
@@ -1563,18 +1576,52 @@ impl ListsTableBrowser {
                 self.status_message = Some("Item saved".to_string());
                 self.error_message = None;
                 
-                // Update item in place in the local list (preserves selection)
-                if let Some(idx) = self.items.iter().position(|i| i.id == item_id) {
-                    self.items[idx] = updated.clone();
-                    // Re-sort (completed items at bottom)
-                    Self::sort_items(&mut self.items);
-                    // Find the item's new position after sort
-                    if let Some(new_idx) = self.items.iter().position(|i| i.id == item_id) {
-                        self.table_state.select(Some(new_idx));
+                // Update item in the appropriate list based on where we came from
+                let item_id_clone = item_id.clone();
+                match self.edit_from_view {
+                    View::Items => {
+                        if let Some(idx) = self.items.iter().position(|i| i.id == item_id_clone) {
+                            self.items[idx] = updated.clone();
+                            Self::sort_items(&mut self.items);
+                            if let Some(new_idx) = self.items.iter().position(|i| i.id == item_id_clone) {
+                                self.table_state.select(Some(new_idx));
+                            }
+                        }
+                        self.view = View::Items;
+                    }
+                    View::Search => {
+                        if let Some(idx) = self.search_results.iter().position(|i| i.id == item_id_clone) {
+                            self.search_results[idx] = updated.clone();
+                            Self::sort_items(&mut self.search_results);
+                            if let Some(new_idx) = self.search_results.iter().position(|i| i.id == item_id_clone) {
+                                self.search_table_state.select(Some(new_idx));
+                            }
+                        }
+                        self.view = View::Search;
+                    }
+                    View::AqlQuery => {
+                        if let Some(idx) = self.aql_results.iter().position(|i| i.id == item_id_clone) {
+                            self.aql_results[idx] = updated.clone();
+                            Self::sort_items(&mut self.aql_results);
+                            if let Some(new_idx) = self.aql_results.iter().position(|i| i.id == item_id_clone) {
+                                self.aql_table_state.select(Some(new_idx));
+                            }
+                        }
+                        self.view = View::AqlQuery;
+                    }
+                    View::Detail => {
+                        // Update detail_item and return to detail
+                        self.detail_item = Some(updated.clone());
+                        // Also update in items list if present
+                        if let Some(idx) = self.items.iter().position(|i| i.id == item_id_clone) {
+                            self.items[idx] = updated.clone();
+                        }
+                        self.view = View::Detail;
+                    }
+                    _ => {
+                        self.view = View::Items;
                     }
                 }
-                
-                self.view = View::Items;
             }
             Err(e) => {
                 self.error_message = Some(format!("Failed to save: {}", e));
@@ -1589,7 +1636,8 @@ impl ListsTableBrowser {
     fn cancel_edit(&mut self) {
         self.edit_item = None;
         self.edit_form = None;
-        self.view = View::Items;
+        // Return to original view with selection preserved
+        self.view = self.edit_from_view;
     }
     
     fn open_selected_url(&self) {
