@@ -16,7 +16,19 @@ TUI client for the [Assistant](https://github.com/kcosr/assistant) workspace, bu
 ## Installation
 
 ```bash
-cargo install --path .
+# Clone FrankenTUI (required dependency)
+git clone https://github.com/Dicklesworthstone/frankentui.git
+
+# Clone assistant-cli next to it
+git clone https://github.com/kcosr/assistant-cli.git
+
+# Build
+cd assistant-cli
+cargo build --release
+
+# Binary is at target/release/assistant-cli
+# Optionally copy it somewhere on your PATH:
+cp target/release/assistant-cli ~/.local/bin/
 ```
 
 ## Usage
