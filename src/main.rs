@@ -1068,7 +1068,7 @@ impl Model for ListsTableBrowser {
             InputMode::AqlQuery => format!("{} Enter:run-query  Esc:cancel ", ws_indicator),
             InputMode::ListFilter => format!("{} Enter:select  Esc:clear-filter ", ws_indicator),
             InputMode::Normal => match self.view {
-                View::Detail => format!("{} Esc:back  e:edit  o:open-url  j/k:scroll  q:quit ", ws_indicator),
+                View::Detail => format!("{} Esc:back  e:edit  d:delete  o:open-url  j/k:scroll  q:quit ", ws_indicator),
                 View::Edit => format!("{} Tab:focus  Enter:save  Esc:cancel ", ws_indicator),
                 _ => format!("{} q:quit  /:search  ::aql  n:new  e:edit  d:del  Space:✓  o:open  y:copy ", ws_indicator),
             },
@@ -1285,21 +1285,28 @@ impl ListsTableBrowser {
     
     fn delete_selected_item(&mut self) {
         // Show confirmation dialog instead of deleting immediately
-        let (items, state) = match self.view {
-            View::Items => (&self.items, &self.table_state),
-            View::Search => (&self.search_results, &self.search_table_state),
-            View::AqlQuery => (&self.aql_results, &self.aql_table_state),
-            _ => return,
+        let item = match self.view {
+            View::Items => {
+                self.table_state.selected.and_then(|idx| self.items.get(idx))
+            }
+            View::Search => {
+                self.search_table_state.selected.and_then(|idx| self.search_results.get(idx))
+            }
+            View::AqlQuery => {
+                self.aql_table_state.selected.and_then(|idx| self.aql_results.get(idx))
+            }
+            View::Detail => {
+                self.detail_item.as_ref()
+            }
+            _ => None,
         };
         
-        if let Some(idx) = state.selected {
-            if let Some(item) = items.get(idx) {
-                let list_id = self.selected_list().map(|l| l.id.clone());
-                if let Some(list_id) = list_id {
-                    // Store item info and show dialog
-                    self.delete_confirm = Some((list_id, item.id.clone(), item.title.clone()));
-                    self.dialog_state = DialogState::new();
-                }
+        if let Some(item) = item {
+            let list_id = self.selected_list().map(|l| l.id.clone());
+            if let Some(list_id) = list_id {
+                // Store item info and show dialog
+                self.delete_confirm = Some((list_id, item.id.clone(), item.title.clone()));
+                self.dialog_state = DialogState::new();
             }
         }
     }
@@ -1311,6 +1318,27 @@ impl ListsTableBrowser {
         
         match delete_item(&self.base_url, &list_id, &item_id) {
             Ok(()) => {
+                // Handle Detail view specially - go back to Items
+                if self.view == View::Detail {
+                    self.detail_item = None;
+                    // Remove from items list too
+                    if let Some(idx) = self.items.iter().position(|i| i.id == item_id) {
+                        self.items.remove(idx);
+                        // Adjust selection
+                        if let Some(selected) = self.table_state.selected {
+                            if selected >= self.items.len() && !self.items.is_empty() {
+                                self.table_state.select(Some(self.items.len() - 1));
+                            } else if self.items.is_empty() {
+                                self.table_state.select(None);
+                            }
+                        }
+                    }
+                    self.view = View::Items;
+                    self.status_message = Some("Item deleted".to_string());
+                    self.error_message = None;
+                    return;
+                }
+                
                 // Remove from the appropriate list
                 let (items, state) = match self.view {
                     View::Items => (&mut self.items, &mut self.table_state),
@@ -2018,7 +2046,7 @@ impl ListsTableBrowser {
                     }
                     
                     KeyCode::Char('d') => {
-                        if self.view == View::Items || self.view == View::Search || self.view == View::AqlQuery {
+                        if matches!(self.view, View::Items | View::Search | View::AqlQuery | View::Detail) {
                             self.delete_selected_item();
                         }
                     }
