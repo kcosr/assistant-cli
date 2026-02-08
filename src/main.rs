@@ -52,6 +52,19 @@ struct ApiResponse<T> {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct CustomFieldDef {
+    key: String,
+    label: String,
+    #[serde(rename = "type")]
+    field_type: String,
+    #[serde(default)]
+    options: Option<Vec<String>>,
+    #[serde(default)]
+    markdown: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ListInfo {
     id: String,
     name: String,
@@ -59,6 +72,8 @@ struct ListInfo {
     tags: Vec<String>,
     #[serde(default)]
     description: Option<String>,
+    #[serde(default)]
+    custom_fields: Option<Vec<CustomFieldDef>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -74,6 +89,8 @@ struct ListItem {
     notes: Option<String>,
     #[serde(default)]
     completed: Option<bool>,
+    #[serde(default)]
+    custom_fields: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 // ============================================================================
@@ -214,6 +231,7 @@ fn update_item_fields(
     tags: Option<Vec<String>>,
     notes: Option<&str>,
     completed: Option<bool>,
+    custom_fields: Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<ListItem, String> {
     let mut body = serde_json::json!({
         "listId": list_id,
@@ -242,6 +260,9 @@ fn update_item_fields(
     }
     if let Some(c) = completed {
         body["completed"] = serde_json::json!(c);
+    }
+    if let Some(cf) = custom_fields {
+        body["customFields"] = serde_json::Value::Object(cf);
     }
     
     api_post(base_url, "item-update", &body.to_string())
@@ -398,13 +419,14 @@ enum InputMode {
 }
 
 /// Columns that can be shown in the table
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Column {
     Status,
     Title,
     Tags,
     Url,
     Notes,
+    Custom(String, String),  // (key, label)
 }
 
 impl Column {
@@ -419,23 +441,25 @@ impl Column {
         }
     }
     
-    fn header(&self) -> &'static str {
+    fn header(&self) -> String {
         match self {
-            Column::Status => "",
-            Column::Title => "Title",
-            Column::Tags => "Tags",
-            Column::Url => "URL",
-            Column::Notes => "📝",
+            Column::Status => String::new(),
+            Column::Title => "Title".to_string(),
+            Column::Tags => "Tags".to_string(),
+            Column::Url => "URL".to_string(),
+            Column::Notes => "📝".to_string(),
+            Column::Custom(_, label) => label.clone(),
         }
     }
     
-    fn aql_field(&self) -> &'static str {
+    fn aql_field(&self) -> String {
         match self {
-            Column::Status => "completed",
-            Column::Title => "title",
-            Column::Tags => "tags",
-            Column::Url => "url",
-            Column::Notes => "notes",
+            Column::Status => "completed".to_string(),
+            Column::Title => "title".to_string(),
+            Column::Tags => "tags".to_string(),
+            Column::Url => "url".to_string(),
+            Column::Notes => "notes".to_string(),
+            Column::Custom(key, _) => format!("customFields.{}", key),
         }
     }
 }
@@ -495,6 +519,9 @@ struct ListsTableBrowser {
     aql_columns: Option<Vec<Column>>,  // Columns from `show` clause
     sort_column: Option<Column>,
     sort_direction: SortDirection,
+    
+    // Current list's custom field definitions
+    current_list_fields: Vec<CustomFieldDef>,
     
     // Detail view
     detail_item: Option<ListItem>,
@@ -592,6 +619,7 @@ impl ListsTableBrowser {
             aql_query: String::new(),
             list_filter: String::new(),
             aql_columns: None,
+            current_list_fields: Vec::new(),
             sort_column: None,
             sort_direction: SortDirection::Desc,
             detail_item: None,
@@ -1153,7 +1181,12 @@ impl ListsTableBrowser {
     
     fn load_items(&mut self) {
         if let Some(list) = self.selected_list() {
-            match fetch_items(&self.base_url, &list.id, 100) {
+            // Store custom field definitions for this list (clone to avoid borrow)
+            let fields = list.custom_fields.clone().unwrap_or_default();
+            let list_id = list.id.clone();
+            self.current_list_fields = fields;
+            
+            match fetch_items(&self.base_url, &list_id, 100) {
                 Ok(mut items) => {
                     Self::sort_items(&mut items);
                     self.items = items;
@@ -1453,10 +1486,10 @@ impl ListsTableBrowser {
     
     fn sort_by_column(&mut self, column: Column) {
         // Toggle direction if same column, otherwise default to desc
-        if self.sort_column == Some(column) {
+        if self.sort_column.as_ref() == Some(&column) {
             self.sort_direction = self.sort_direction.toggle();
         } else {
-            self.sort_column = Some(column);
+            self.sort_column = Some(column.clone());
             self.sort_direction = SortDirection::Desc;
         }
         
@@ -1489,7 +1522,7 @@ impl ListsTableBrowser {
         let positions = self.column_positions.take();
         let result = positions.iter()
             .find(|(_, start, end)| x >= *start && x < *end)
-            .map(|(col, _, _)| *col);
+            .map(|(col, _, _)| col.clone());
         self.column_positions.set(positions);
         result
     }
@@ -1529,13 +1562,27 @@ impl ListsTableBrowser {
         
         let Some(item) = item else { return };
         
-        // Create form with item fields
-        let form = Form::new(vec![
+        // Build form fields: standard fields + custom fields
+        let mut fields = vec![
             FormField::text_with_value("Title", &item.title),
             FormField::text_with_value("URL", item.url.as_deref().unwrap_or("")),
             FormField::text_with_value("Tags", item.tags.join(", ")),
             FormField::checkbox("Completed", item.completed.unwrap_or(false)),
-        ])
+        ];
+        
+        // Add custom fields from the list definition
+        for field_def in &self.current_list_fields {
+            let value = item.custom_fields.as_ref()
+                .and_then(|cf| cf.get(&field_def.key))
+                .and_then(|v| match v {
+                    serde_json::Value::String(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+            fields.push(FormField::text_with_value(&field_def.label, value));
+        }
+        
+        let form = Form::new(fields)
         .label_style(Style::new().fg(colors::FG_SECONDARY))
         .focused_style(Style::new().fg(colors::ACCENT_PRIMARY).bg(colors::BG_SELECTED))
         .style(Style::new().fg(colors::FG_PRIMARY));
@@ -1583,6 +1630,25 @@ impl ListsTableBrowser {
                 .collect()
         });
         
+        // Extract custom field values
+        let mut custom_field_values: Option<serde_json::Map<String, serde_json::Value>> = None;
+        if !self.current_list_fields.is_empty() {
+            let mut cf_map = serde_json::Map::new();
+            for field_def in &self.current_list_fields {
+                let value = data.get(field_def.label.as_str()).and_then(|v| {
+                    if let FormValue::Text(s) = v { Some(s.as_str()) } else { None }
+                });
+                if let Some(val) = value {
+                    if val.is_empty() {
+                        cf_map.insert(field_def.key.clone(), serde_json::Value::Null);
+                    } else {
+                        cf_map.insert(field_def.key.clone(), serde_json::Value::String(val.to_string()));
+                    }
+                }
+            }
+            custom_field_values = Some(cf_map);
+        }
+        
         // Get notes from textarea
         let notes_text = self.edit_notes.text();
         let notes = if notes_text.is_empty() { None } else { Some(notes_text.as_str()) };
@@ -1599,6 +1665,7 @@ impl ListsTableBrowser {
             tags,
             notes,
             completed,
+            custom_field_values,
         ) {
             Ok(updated) => {
                 self.status_message = Some("Item saved".to_string());
@@ -2089,16 +2156,24 @@ impl ListsTableBrowser {
             return;
         }
         
-        // Determine which columns to show (default: title and tags)
+        // Determine which columns to show
+        // Default: title, tags, plus any custom fields from the current list
         let default_columns = vec![Column::Title, Column::Tags];
-        let columns: Vec<Column> = if self.view == View::AqlQuery {
+        let mut columns: Vec<Column> = if self.view == View::AqlQuery {
             self.aql_columns.clone().unwrap_or_else(|| default_columns.clone())
         } else {
             default_columns
         };
         
-        // Build table rows based on columns
-        let rows: Vec<Row> = items.iter().map(|item| {
+        // Add custom field columns (for Items and AqlQuery views when no explicit show clause)
+        if self.aql_columns.is_none() && !self.current_list_fields.is_empty() {
+            for field_def in &self.current_list_fields {
+                columns.push(Column::Custom(field_def.key.clone(), field_def.label.clone()));
+            }
+        }
+        
+        // Build cell text for all rows first so we can measure content widths
+        let cell_data: Vec<(Vec<String>, bool)> = items.iter().map(|item| {
             let is_completed = item.completed.unwrap_or(false);
             let cells: Vec<String> = columns.iter().map(|col| {
                 match col {
@@ -2107,7 +2182,7 @@ impl ListsTableBrowser {
                     }
                     Column::Title => {
                         if is_completed {
-                            format!("̶{}", item.title) // Unicode combining long stroke overlay
+                            format!("̶{}", item.title)
                         } else {
                             item.title.clone()
                         }
@@ -2123,7 +2198,6 @@ impl ListsTableBrowser {
                         if item.url.is_some() { "🔗".to_string() } else { "  ".to_string() }
                     }
                     Column::Notes => {
-                        // Show truncated notes content instead of just icon
                         if let Some(ref notes) = item.notes {
                             let first_line = notes.lines().next().unwrap_or("");
                             if first_line.len() > 40 {
@@ -2135,9 +2209,34 @@ impl ListsTableBrowser {
                             String::new()
                         }
                     }
+                    Column::Custom(key, _) => {
+                        item.custom_fields.as_ref()
+                            .and_then(|cf| cf.get(key))
+                            .map(|v| match v {
+                                serde_json::Value::String(s) => s.clone(),
+                                serde_json::Value::Null => String::new(),
+                                other => other.to_string(),
+                            })
+                            .unwrap_or_default()
+                    }
                 }
             }).collect();
-            
+            (cells, is_completed)
+        }).collect();
+        
+        // Measure max content width per column (including header)
+        let mut max_widths: Vec<u16> = columns.iter().map(|c| c.header().chars().count() as u16 + 2).collect();
+        for (cells, _) in &cell_data {
+            for (i, cell) in cells.iter().enumerate() {
+                let w = cell.chars().count() as u16;
+                if w > max_widths[i] {
+                    max_widths[i] = w;
+                }
+            }
+        }
+        
+        // Build rows from pre-computed cell data
+        let rows: Vec<Row> = cell_data.into_iter().map(|(cells, is_completed)| {
             let row = Row::new(cells);
             if is_completed {
                 row.style(Style::new().fg(colors::FG_MUTED).strikethrough())
@@ -2146,61 +2245,70 @@ impl ListsTableBrowser {
             }
         }).collect();
         
-        // Column widths based on which columns are shown
-        let widths: Vec<Constraint> = columns.iter().map(|col| {
+        // Content-aware column sizing
+        // 1. Start with measured content widths (capped per column type)
+        // 2. If total exceeds available, shrink proportionally; give Title overflow
+        // 3. If total is under available, give leftover to Title
+        let spacing = 1u16;
+        let total_spacing = spacing * columns.len().saturating_sub(1) as u16;
+        let available = area.width.saturating_sub(total_spacing);
+        
+        // Cap max widths per column type
+        let mut col_widths: Vec<u16> = columns.iter().enumerate().map(|(i, col)| {
+            let measured = max_widths[i];
             match col {
-                Column::Status => Constraint::Fixed(2),
-                Column::Title => Constraint::Min(20),
-                Column::Tags => Constraint::Fixed(20),
-                Column::Url => Constraint::Fixed(3),
-                Column::Notes => Constraint::Min(30),
+                Column::Status => measured.min(2),
+                Column::Title => measured.min(80),
+                Column::Tags => measured.min(30),
+                Column::Url => measured.min(4),
+                Column::Notes => measured.min(50),
+                Column::Custom(_, _) => measured.min(30),
             }
         }).collect();
         
-        // Calculate actual column positions for click detection
-        // Account for column_spacing(1) between columns
-        let spacing = 1u16;
-        let total_spacing = spacing * (columns.len().saturating_sub(1)) as u16;
-        let available = area.width.saturating_sub(total_spacing);
+        let total: u16 = col_widths.iter().sum();
         
-        // Calculate widths similar to how Layout would
-        let mut col_widths: Vec<u16> = Vec::new();
-        let mut remaining = available;
-        let mut min_cols: Vec<usize> = Vec::new();
-        
-        for (i, col) in columns.iter().enumerate() {
-            match col {
-                Column::Status => col_widths.push(2),
-                Column::Title => { col_widths.push(20); min_cols.push(i); }
-                Column::Tags => col_widths.push(20),
-                Column::Url => col_widths.push(3),
-                Column::Notes => { col_widths.push(30); min_cols.push(i); }
+        if total > available {
+            // Over budget — shrink Title first, then proportionally
+            let title_idx = columns.iter().position(|c| matches!(c, Column::Title));
+            let overshoot = total - available;
+            if let Some(ti) = title_idx {
+                let shrink = overshoot.min(col_widths[ti].saturating_sub(10));
+                col_widths[ti] -= shrink;
+                let remaining_overshoot = overshoot - shrink;
+                if remaining_overshoot > 0 {
+                    // Proportional shrink of all non-status columns
+                    let total_shrinkable: u16 = col_widths.iter().enumerate()
+                        .filter(|(j, _)| !matches!(columns[*j], Column::Status))
+                        .map(|(_, w)| *w)
+                        .sum();
+                    if total_shrinkable > 0 {
+                        for (j, w) in col_widths.iter_mut().enumerate() {
+                            if !matches!(columns[j], Column::Status) {
+                                let frac = (*w as f32) / (total_shrinkable as f32);
+                                let reduction = (remaining_overshoot as f32 * frac) as u16;
+                                *w = w.saturating_sub(reduction).max(4);
+                            }
+                        }
+                    }
+                }
+            }
+        } else if total < available {
+            // Under budget — give leftover to Title
+            let leftover = available - total;
+            if let Some(ti) = columns.iter().position(|c| matches!(c, Column::Title)) {
+                col_widths[ti] += leftover;
             }
         }
         
-        // Subtract fixed widths
-        for (i, w) in col_widths.iter().enumerate() {
-            if !min_cols.contains(&i) {
-                remaining = remaining.saturating_sub(*w);
-            }
-        }
+        let widths: Vec<Constraint> = col_widths.iter().map(|&w| Constraint::Fixed(w)).collect();
         
-        // Distribute remaining space to Min columns
-        if !min_cols.is_empty() {
-            let min_total: u16 = min_cols.iter().map(|&i| col_widths[i]).sum();
-            remaining = remaining.saturating_sub(min_total);
-            let extra_per = remaining / min_cols.len() as u16;
-            for &i in &min_cols {
-                col_widths[i] += extra_per;
-            }
-        }
-        
-        // Build column positions
+        // Build column positions for click detection
         let mut positions: Vec<(Column, u16, u16)> = Vec::new();
         let mut x = area.x;
         for (i, col) in columns.iter().enumerate() {
             let w = col_widths[i];
-            positions.push((*col, x, x + w));
+            positions.push((col.clone(), x, x + w));
             x += w + spacing;
         }
         self.column_positions.set(positions);
@@ -2208,10 +2316,10 @@ impl ListsTableBrowser {
         // Header based on columns (with sort indicator)
         let header_cells: Vec<String> = columns.iter().map(|c| {
             let base = c.header();
-            if self.sort_column == Some(*c) {
+            if self.sort_column.as_ref() == Some(c) {
                 format!("{} {}", base, self.sort_direction.indicator())
             } else {
-                base.to_string()
+                base
             }
         }).collect();
         let header = Row::new(header_cells)
@@ -2260,6 +2368,24 @@ impl ListsTableBrowser {
                 header_lines.push((String::new(), Style::default()));
             }
             
+            // Custom fields
+            if let Some(ref cf) = item.custom_fields {
+                for field_def in &self.current_list_fields {
+                    if let Some(value) = cf.get(&field_def.key) {
+                        let display = match value {
+                            serde_json::Value::String(s) => s.clone(),
+                            serde_json::Value::Null => continue,
+                            other => other.to_string(),
+                        };
+                        if !display.is_empty() {
+                            header_lines.push((field_def.label.clone(), Style::new().fg(colors::ACCENT_PRIMARY)));
+                            header_lines.push((format!("  {}", display), Style::new().fg(colors::FG_PRIMARY)));
+                            header_lines.push((String::new(), Style::default()));
+                        }
+                    }
+                }
+            }
+            
             // Notes label
             if item.notes.is_some() {
                 header_lines.push(("Notes".to_string(), Style::new().fg(colors::ACCENT_PRIMARY)));
@@ -2303,13 +2429,16 @@ impl ListsTableBrowser {
     fn render_edit(&self, frame: &mut Frame, area: Rect) {
         let Some(ref form) = self.edit_form else { return };
         
-        // Layout: form fields (6 lines) + notes label (1) + notes area (rest) + buttons (1)
+        // Layout: form fields + notes label (1) + notes area (rest) + buttons (1)
+        // Each form field takes ~1.5 lines on avg; base 4 fields + custom fields
+        let num_fields = 4 + self.current_list_fields.len();
+        let form_height = (num_fields as u16 * 2).min(area.height.saturating_sub(8));
         let chunks = Flex::vertical()
             .constraints([
-                Constraint::Fixed(6),   // Form fields
-                Constraint::Fixed(1),   // Notes label
-                Constraint::Min(5),     // Notes textarea
-                Constraint::Fixed(1),   // Buttons
+                Constraint::Fixed(form_height),  // Form fields
+                Constraint::Fixed(1),            // Notes label
+                Constraint::Min(5),              // Notes textarea
+                Constraint::Fixed(1),            // Buttons
             ])
             .split(area);
         
