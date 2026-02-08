@@ -2312,11 +2312,13 @@ impl ListsTableBrowser {
         let notes_inner = notes_block.inner(chunks[2]);
         notes_block.render(chunks[2], frame);
         
-        // Render textarea
+        // Render textarea with cursor when focused
+        let notes_focused = self.edit_focus == EditFocus::Notes;
         let mut notes = self.edit_notes.clone();
         notes = notes
             .with_style(Style::new().fg(colors::FG_PRIMARY))
-            .with_soft_wrap(true);
+            .with_soft_wrap(true)
+            .with_focus(notes_focused);
         Widget::render(&notes, notes_inner, frame);
         
         // === Buttons ===
