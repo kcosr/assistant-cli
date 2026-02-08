@@ -1,6 +1,6 @@
 # Assistant CLI
 
-TUI client for the Assistant workspace, built with [FrankenTUI](https://github.com/anthropics/frankentui).
+TUI client for the [Assistant](https://github.com/kcosr/assistant) workspace, built with [FrankenTUI](https://github.com/Dicklesworthstone/frankentui).
 
 ## Features
 
