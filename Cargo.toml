@@ -7,7 +7,7 @@ description = "TUI client for the Assistant Lists plugin"
 license = "MIT"
 
 [[bin]]
-name = "lists"
+name = "assistant-cli"
 path = "src/main.rs"
 
 [dependencies]

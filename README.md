@@ -29,7 +29,7 @@ export ASSISTANT_URL=http://localhost:3000
 export LISTS_FILTER=work,personal
 
 # Run the lists browser
-lists
+assistant-cli
 ```
 
 ## Keybindings
